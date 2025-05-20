@@ -20,7 +20,7 @@ function calculateStats(
   const filteredTxs = Array.from(confirmedTxs.entries())
     .sort(([nonceA], [nonceB]) => Number(nonceB) - Number(nonceA))
     .slice(0, 50) // Take only last 50 transactions
-    .map(([_, tx]) => tx);
+    .map(([, tx]) => tx);
 
   const latencies = filteredTxs
     .map((tx) => tx.latencyMs || 0)
