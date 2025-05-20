@@ -17,7 +17,7 @@ export async function POST(request: Request) {
             );
         }
 
-        const provider = new JsonRpcProvider(process.env.NEXT_PUBLIC_DEFAULT_RPC_URL);
+        const provider = new JsonRpcProvider(process.env.NEXT_PRIVATE_RPC_URL);
         const fundingWallet = new Wallet(process.env.FUNDING_PRIVATE_KEY!, provider);
 
 
