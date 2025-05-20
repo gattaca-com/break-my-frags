@@ -1,60 +1,68 @@
-'use client'
+"use client";
 
-import { useState, useEffect, useCallback } from 'react';
-import {
-  JsonRpcProvider,
-  Wallet,
-  parseUnits,
-  formatEther,
-} from 'ethers';
-import { HDNodeWallet } from 'ethers';
-import { TransactionRequest } from 'ethers';
+import { useState, useEffect, useCallback, useRef } from "react";
+import { JsonRpcProvider, Wallet, parseUnits, formatEther } from "ethers";
+import { HDNodeWallet } from "ethers";
+import { TransactionRequest } from "ethers";
 
 type TxInfo = {
-  status: 'pending' | 'confirmed';
+  hash: string;
   sendTimeMs: number;
   blockNumber?: number;
   txIndex?: number;
   latencyMs?: number;
-  nonce: number;
 };
 
-function calculateStats(txs: Record<string, TxInfo>) {
-  const confirmedTxs = Object.values(txs)
-    .filter(tx => tx.status === 'confirmed');
+function calculateStats(
+  confirmedTxs: Map<number, TxInfo>,
+  stillPending: number
+) {
+  const filteredTxs = Array.from(confirmedTxs.entries())
+    .sort(([nonceA], [nonceB]) => Number(nonceB) - Number(nonceA))
+    .slice(0, 50) // Take only last 50 transactions
+    .map(([_, tx]) => tx);
 
-  const filteredTxs = confirmedTxs.sort((a, b) => b.sendTimeMs - a.sendTimeMs) // Sort by most recent first
-    .slice(0, 50); // Take only last 50 transactions
+  const latencies = filteredTxs
+    .map((tx) => tx.latencyMs || 0)
+    .filter((latency) => latency > 0); // Only include confirmed transactions
 
-  const latencies = filteredTxs.map(tx => tx.latencyMs || 0);
+  const p50 =
+    latencies.length > 0
+      ? latencies.sort((a, b) => a - b)[Math.floor(latencies.length * 0.5)]
+      : 0;
 
-  const p50 = latencies.sort((a, b) => a - b)[Math.floor(latencies.length * 0.5)] || 0;
-  const avg = latencies.length > 0
-    ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)
-    : 0;
+  const avg =
+    latencies.length > 0
+      ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)
+      : 0;
 
   return {
-    totalTxs: Object.keys(txs).length,
-    confirmedTxs: confirmedTxs.length,
+    totalTxs: confirmedTxs.size + stillPending,
+    confirmedTxs: confirmedTxs.size,
     p50Latency: p50,
     avgLatency: avg,
   };
 }
 
 export default function Home() {
-  const [provider, setProvider] = useState(() => new JsonRpcProvider(process.env.NEXT_PUBLIC_DEFAULT_RPC_URL));
+  const [provider, setProvider] = useState(
+    () => new JsonRpcProvider(process.env.NEXT_PUBLIC_DEFAULT_RPC_URL)
+  );
   const [chainId, setChainId] = useState(BigInt(0));
   const [rpcUrl, setRpcUrl] = useState(process.env.NEXT_PUBLIC_DEFAULT_RPC_URL);
   const [wallet, setWallet] = useState<HDNodeWallet | null>(null);
   const [nonce, setNonce] = useState(0);
-  const [txs, setTxs] = useState<Record<string, TxInfo>>({});
-  const [pendingTxs, setPendingTxs] = useState<Set<string>>(new Set());
+  const [confirmedTxs, setConfirmedTxs] = useState<Map<number, TxInfo>>(
+    new Map()
+  );
+  const [pendingTxs, setPendingTxs] = useState<Map<number, TxInfo>>(new Map());
   const [balance, setBalance] = useState<bigint>(BigInt(0));
   const [pingLatency, setPingLatency] = useState<number>(0);
   const [autoSend, setAutoSend] = useState(false);
+  const isPolling = useRef(false);
 
-  const ethValue = parseUnits('1', 'gwei');
-  const gasPrice = parseUnits('1', 'gwei');
+  const ethValue = parseUnits("1", "gwei");
+  const gasPrice = parseUnits("0.01", "gwei");
 
   // Initialize provider and chain ID on mount
   useEffect(() => {
@@ -70,30 +78,43 @@ export default function Home() {
     if (pendingTxs.size === 0) return;
 
     const interval = setInterval(async () => {
-      const updated = { ...txs };
-      const stillPending = new Set<string>();
+      if (isPolling.current) return;
+      isPolling.current = true;
 
-      for (const hash of pendingTxs) {
-        const rcpt = await provider.getTransactionReceipt(hash);
-        if (rcpt) {
-          updated[hash] = {
-            ...updated[hash],
-            status: 'confirmed',
-            blockNumber: rcpt.blockNumber,
-            txIndex: rcpt.index,
-            latencyMs: Date.now() - updated[hash].sendTimeMs,
-          };
-        } else {
-          stillPending.add(hash);
+      try {
+        const stillPending: Map<number, TxInfo> = new Map();
+        const updated: Map<number, TxInfo> = new Map();
+
+        for (const [nonce, info] of pendingTxs.entries()) {
+          const rcpt = await provider.getTransactionReceipt(info.hash);
+          if (rcpt) {
+            updated.set(nonce, {
+              ...info,
+              blockNumber: rcpt.blockNumber,
+              txIndex: rcpt.index,
+              latencyMs: Date.now() - info.sendTimeMs,
+            });
+          } else {
+            stillPending.set(nonce, info);
+          }
         }
-      }
 
-      setTxs(updated);
-      setPendingTxs(stillPending);
-    }, 15);
+        setConfirmedTxs((prev) => new Map([...prev, ...updated]));
+
+        setPendingTxs((prev) => {
+          const next = new Map(prev);
+          for (const nonce of updated.keys()) {
+            next.delete(nonce);
+          }
+          return next;
+        });
+      } finally {
+        isPolling.current = false;
+      }
+    }, 20);
 
     return () => clearInterval(interval);
-  }, [pendingTxs, provider, txs]);
+  }, [pendingTxs, provider]);
 
   // Add this effect to update balance
   useEffect(() => {
@@ -119,7 +140,7 @@ export default function Home() {
         const end = Date.now();
         setPingLatency(end - start);
       } catch (error) {
-        console.error('Ping measurement failed:', error);
+        console.error("Ping measurement failed:", error);
       }
     };
 
@@ -135,10 +156,10 @@ export default function Home() {
 
     try {
       // Call the airdrop API
-      const response = await fetch('/api/airdrop', {
-        method: 'POST',
+      const response = await fetch("/api/airdrop", {
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           address: w.address,
@@ -146,7 +167,7 @@ export default function Home() {
       });
 
       if (!response.ok) {
-        throw new Error('Airdrop failed');
+        throw new Error("Airdrop failed");
       }
 
       // Wait for the transaction to be mined
@@ -159,10 +180,10 @@ export default function Home() {
 
       // Get and set the nonce
       const currentNonce = await provider.getTransactionCount(w.address);
-      console.log('Current nonce:', currentNonce);
+      console.log("Current nonce:", currentNonce);
       setNonce(currentNonce);
     } catch (error) {
-      console.error('Airdrop failed:', error);
+      console.error("Airdrop failed:", error);
       setWallet(null); // Reset wallet on failure
     }
   };
@@ -180,23 +201,27 @@ export default function Home() {
     };
     setNonce((n) => n + 1);
 
-    console.log('Sending transaction:', nonce);
+    console.log("Sending transaction:", nonce);
 
     const signed = await wallet.signTransaction(tx);
     const sendTimeMs = Date.now();
     const response = await provider.broadcastTransaction(signed);
 
-    setTxs((prev) => ({
-      ...prev,
-      [response.hash]: { status: 'pending', sendTimeMs, nonce },
-    }));
-    setPendingTxs((prev) => new Set([...prev, response.hash]));
+    setPendingTxs((prev) => {
+      const next = new Map(prev);
+      next.set(nonce, {
+        hash: response.hash,
+        sendTimeMs,
+      });
+      return next;
+    });
   }, [wallet, chainId, nonce, ethValue, gasPrice, provider]);
 
   // Add handler for RPC URL update
   const handleRpcUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
     setProvider(new JsonRpcProvider(rpcUrl));
+    console.log("RPC URL updated to:", rpcUrl);
   };
 
   useEffect(() => {
@@ -206,10 +231,10 @@ export default function Home() {
       try {
         await handleSend();
       } catch (error) {
-        console.error('Auto-send failed:', error);
-        setAutoSend(false); // Stop auto-send on error
+        console.error("Auto-send failed:", error);
+        setAutoSend(false);
       }
-    }, 25);
+    }, 150);
 
     return () => clearInterval(interval);
   }, [autoSend, wallet, handleSend]); // Added handleSend to dependencies
@@ -254,10 +279,16 @@ export default function Home() {
               <div className="flex justify-between items-start">
                 <div className="space-y-2">
                   <p className="text-gray-300">
-                    Your address: <span className="font-mono text-[#00FFB2]">{wallet.address}</span>
+                    Your address:{" "}
+                    <span className="font-mono text-[#00FFB2]">
+                      {wallet.address}
+                    </span>
                   </p>
                   <p className="text-gray-300">
-                    Balance: <span className="font-mono text-[#00FFB2]">{formatEther(balance)} ETH</span>
+                    Balance:{" "}
+                    <span className="font-mono text-[#00FFB2]">
+                      {formatEther(balance)} ETH
+                    </span>
                   </p>
                 </div>
 
@@ -272,12 +303,14 @@ export default function Home() {
                     <label className="text-sm text-gray-300">Auto Send</label>
                     <button
                       onClick={() => setAutoSend(!autoSend)}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 ${autoSend ? 'bg-[#00FFB2]' : 'bg-[#2A2A2E]'
-                        }`}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 ${
+                        autoSend ? "bg-[#00FFB2]" : "bg-[#2A2A2E]"
+                      }`}
                     >
                       <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-200 ${autoSend ? 'translate-x-6' : 'translate-x-1'
-                          }`}
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-200 ${
+                          autoSend ? "translate-x-6" : "translate-x-1"
+                        }`}
                       />
                     </button>
                   </div>
@@ -289,28 +322,47 @@ export default function Home() {
               <div className="grid grid-cols-6 gap-4">
                 <div className="space-y-1">
                   <p className="text-sm text-gray-400">Total TXs</p>
-                  <p className="text-2xl font-mono text-[#00FFB2]">{calculateStats(txs).totalTxs}</p>
+                  <p className="text-2xl font-mono text-[#00FFB2]">
+                    {calculateStats(confirmedTxs, pendingTxs.size).totalTxs}
+                  </p>
                 </div>
                 <div className="space-y-1">
                   <p className="text-sm text-gray-400">Confirmed TXs</p>
-                  <p className="text-2xl font-mono text-[#00FFB2]">{calculateStats(txs).confirmedTxs}</p>
+                  <p className="text-2xl font-mono text-[#00FFB2]">
+                    {calculateStats(confirmedTxs, pendingTxs.size).confirmedTxs}
+                  </p>
                 </div>
                 <div className="space-y-1">
                   <p className="text-sm text-gray-400">Ping Latency</p>
-                  <p className="text-2xl font-mono text-[#00FFB2]">{pingLatency}ms</p>
+                  <p className="text-2xl font-mono text-[#00FFB2]">
+                    {pingLatency}ms
+                  </p>
                 </div>
                 <div className="col-span-3">
-                  <p className="text-sm text-gray-400 mb-2">Confirmation Latencies</p>
+                  <p className="text-sm text-gray-400 mb-2">
+                    Confirmation Latencies
+                  </p>
                   <div className="grid grid-cols-3 gap-4">
                     <div className="space-y-1">
                       <p className="text-sm text-gray-400">Median</p>
-                      <p className="text-2xl font-mono text-[#00FFB2]">{calculateStats(txs).p50Latency}ms</p>
+                      <p className="text-2xl font-mono text-[#00FFB2]">
+                        {
+                          calculateStats(confirmedTxs, pendingTxs.size)
+                            .p50Latency
+                        }
+                        ms
+                      </p>
                     </div>
                     <div className="space-y-1">
                       <p className="text-sm text-gray-400">Average</p>
-                      <p className="text-2xl font-mono text-[#00FFB2]">{calculateStats(txs).avgLatency}ms</p>
+                      <p className="text-2xl font-mono text-[#00FFB2]">
+                        {
+                          calculateStats(confirmedTxs, pendingTxs.size)
+                            .avgLatency
+                        }
+                        ms
+                      </p>
                     </div>
-
                   </div>
                 </div>
               </div>
@@ -321,42 +373,66 @@ export default function Home() {
                 <thead className="bg-[#1A1A1C]">
                   <tr>
                     <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider"></th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Tx Hash</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Status</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Block#</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Txn Idx</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Latency (ms)</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                      Tx Hash
+                    </th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                      Status
+                    </th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                      Block#
+                    </th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                      Txn Idx
+                    </th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                      Latency (ms)
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#2A2A2E]">
-                  {Object.entries(txs)
-                    .sort(([, a], [, b]) => b.sendTimeMs - a.sendTimeMs)
+                  {[...confirmedTxs.entries(), ...pendingTxs.entries()]
+                    // sort ascending by nonce; for descending swap a and b
+                    .sort(([nonceA], [nonceB]) => nonceB - nonceA)
                     .slice(0, 50)
-                    .map(([hash, info]) => (
-                      <tr key={hash} className={`hover:bg-[#1A1A1C] transition-colors duration-150 ${info.status === 'confirmed' ? 'bg-[#1A1A1C] confirm-flash' : ''
-                        }`}>
-                        <td className="px-4 py-2 font-mono text-sm text-gray-300">{info.nonce}</td>
+                    .map(([nonce, info]) => (
+                      <tr
+                        key={nonce}
+                        className="hover:bg-[#1A1A1C] transition-colors duration-150"
+                      >
+                        <td className="px-4 py-2 font-mono text-sm text-gray-300">
+                          {nonce}
+                        </td>
                         <td className="px-4 py-2 font-mono text-sm text-[#00BFFF]">
                           <a
-                            href={`${process.env.NEXT_PUBLIC_EXPLORER_URL}/tx/${hash}`}
+                            href={`${process.env.NEXT_PUBLIC_EXPLORER_URL}/tx/${info.hash}`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="hover:text-[#00FFB2] hover:underline"
                           >
-                            {hash}
+                            {info.hash}
                           </a>
                         </td>
                         <td className="px-4 py-2 text-sm">
-                          <span className={`inline-block px-3 py-1 rounded-lg text-xs font-medium ${info.status === 'confirmed'
-                            ? 'bg-[#2A2A2E] text-[#00FFB2] border border-[#00FFB2]'
-                            : 'bg-[#2A2A2E] text-[#FFB800] border border-[#FFB800]'
-                            }`}>
-                            {info.status}
+                          <span
+                            className={`inline-block px-3 py-1 rounded-lg text-xs font-medium transition-all duration-300 ${
+                              info.blockNumber
+                                ? "bg-[#2A2A2E] text-[#00FFB2] border border-[#00FFB2]"
+                                : "bg-[#2A2A2E] text-[#FFB800] border border-[#FFB800]"
+                            }`}
+                          >
+                            {info.blockNumber ? "confirmed" : "pending"}
                           </span>
                         </td>
-                        <td className="px-4 py-2 font-mono text-sm text-gray-300">{info.blockNumber ?? '-'}</td>
-                        <td className="px-4 py-2 font-mono text-sm text-gray-300">{info.txIndex ?? '-'}</td>
-                        <td className="px-4 py-2 font-mono text-sm text-gray-300">{info.latencyMs ?? '-'}</td>
+                        <td className="px-4 py-2 font-mono text-sm text-gray-300">
+                          {info.blockNumber ?? "-"}
+                        </td>
+                        <td className="px-4 py-2 font-mono text-sm text-gray-300">
+                          {info.txIndex ?? "-"}
+                        </td>
+                        <td className="px-4 py-2 font-mono text-sm text-gray-300">
+                          {info.latencyMs ?? "-"}
+                        </td>
                       </tr>
                     ))}
                 </tbody>
@@ -385,7 +461,11 @@ export default function Home() {
             className="text-gray-400 hover:text-blue-400 transition-colors duration-200"
           >
             <svg className="h-6 w-6" fill="currentColor" viewBox="0 0 24 24">
-              <path fillRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clipRule="evenodd" />
+              <path
+                fillRule="evenodd"
+                d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"
+                clipRule="evenodd"
+              />
             </svg>
           </a>
         </div>
