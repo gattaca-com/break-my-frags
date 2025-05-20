@@ -49,6 +49,7 @@ export default function Home() {
     () => new JsonRpcProvider(process.env.NEXT_PUBLIC_DEFAULT_RPC_URL)
   );
   const [chainId, setChainId] = useState(BigInt(0));
+  const [currentBlock, setCurrentBlock] = useState<number>(0);
   const [rpcUrl, setRpcUrl] = useState(process.env.NEXT_PUBLIC_DEFAULT_RPC_URL);
   const [wallet, setWallet] = useState<HDNodeWallet | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -146,6 +147,22 @@ export default function Home() {
 
     measurePing();
     const interval = setInterval(measurePing, 500);
+    return () => clearInterval(interval);
+  }, [provider]);
+
+  // Add this effect for block number updates
+  useEffect(() => {
+    const updateBlockNumber = async () => {
+      try {
+        const blockNumber = await provider.getBlockNumber();
+        setCurrentBlock(blockNumber);
+      } catch (error) {
+        console.error("Failed to fetch block number:", error);
+      }
+    };
+
+    updateBlockNumber();
+    const interval = setInterval(updateBlockNumber, 1500);
     return () => clearInterval(interval);
   }, [provider]);
 
@@ -338,11 +355,17 @@ export default function Home() {
                     {pingLatency}ms
                   </p>
                 </div>
-                <div className="col-span-3">
+                <div className="space-y-1">
+                  <p className="text-sm text-gray-400">Current Block</p>
+                  <p className="text-2xl font-mono text-[#00FFB2]">
+                    {currentBlock}
+                  </p>
+                </div>
+                <div className="col-span-2">
                   <p className="text-sm text-gray-400 mb-2">
                     Confirmation Latencies
                   </p>
-                  <div className="grid grid-cols-3 gap-4">
+                  <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1">
                       <p className="text-sm text-gray-400">Median</p>
                       <p className="text-2xl font-mono text-[#00FFB2]">
