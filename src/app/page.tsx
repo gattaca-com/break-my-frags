@@ -4,11 +4,8 @@ import { useState, useEffect } from 'react';
 import {
   JsonRpcProvider,
   Wallet,
-  toBeHex,
-  parseEther,
   parseUnits,
   formatEther,
-  ZeroAddress
 } from 'ethers';
 import { HDNodeWallet } from 'ethers';
 import { TransactionRequest } from 'ethers';
