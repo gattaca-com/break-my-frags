@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   JsonRpcProvider,
   Wallet,
@@ -167,8 +167,8 @@ export default function Home() {
     }
   };
 
-  // Handler: send a transaction
-  const handleSend = async () => {
+  // Wrap handleSend in useCallback
+  const handleSend = useCallback(async () => {
     if (!wallet) return;
     const tx: TransactionRequest = {
       chainId,
@@ -191,7 +191,7 @@ export default function Home() {
       [response.hash]: { status: 'pending', sendTimeMs, nonce },
     }));
     setPendingTxs((prev) => new Set([...prev, response.hash]));
-  };
+  }, [wallet, chainId, nonce, ethValue, gasPrice, provider]);
 
   // Add handler for RPC URL update
   const handleRpcUpdate = async (e: React.FormEvent) => {
@@ -332,7 +332,7 @@ export default function Home() {
                   {Object.entries(txs)
                     .sort(([, a], [, b]) => b.sendTimeMs - a.sendTimeMs)
                     .slice(0, 50)
-                    .map(([hash, info], index) => (
+                    .map(([hash, info]) => (
                       <tr key={hash} className={`hover:bg-[#1A1A1C] transition-colors duration-150 ${info.status === 'confirmed' ? 'bg-[#1A1A1C] confirm-flash' : ''
                         }`}>
                         <td className="px-4 py-2 font-mono text-sm text-gray-300">{info.nonce}</td>
