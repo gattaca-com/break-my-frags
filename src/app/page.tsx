@@ -4,12 +4,12 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { JsonRpcProvider, Wallet, parseUnits, formatEther } from "ethers";
 import { HDNodeWallet } from "ethers";
 import { TransactionRequest } from "ethers";
+import { FutureGateway, Gateway } from "@/types";
 
 type TxInfo = {
   hash: string;
   sendTimeMs: number;
   blockNumber?: number;
-  txIndex?: number;
   latencyMs?: number;
 };
 
@@ -61,9 +61,11 @@ export default function Home() {
   const [pingLatency, setPingLatency] = useState<number>(0);
   const [autoSend, setAutoSend] = useState(false);
   const isPolling = useRef(false);
+  const [gateways, setGateways] = useState<Gateway[]>([]);
+  const [futureGateways, setFutureGateways] = useState<FutureGateway[]>([]);
 
   const ethValue = parseUnits("1", "gwei");
-  const gasPrice = parseUnits("0.01", "gwei");
+  const gasPrice = parseUnits("0.1", "gwei");
 
   // Initialize provider and chain ID on mount
   useEffect(() => {
@@ -92,7 +94,6 @@ export default function Home() {
             updated.set(nonce, {
               ...info,
               blockNumber: rcpt.blockNumber,
-              txIndex: rcpt.index,
               latencyMs: Date.now() - info.sendTimeMs,
             });
           } else {
@@ -100,7 +101,18 @@ export default function Home() {
           }
         }
 
-        setConfirmedTxs((prev) => new Map([...prev, ...updated]));
+        setConfirmedTxs((prev) => {
+          // Combine previous and new transactions
+          const allTxs = new Map([...prev, ...updated]);
+
+          // Sort by nonce (descending) and take only the first 100
+          const sortedEntries = Array.from(allTxs.entries())
+            .sort(([nonceA], [nonceB]) => nonceB - nonceA)
+            .slice(0, 100);
+
+          // Create new Map with only the latest 100 transactions
+          return new Map(sortedEntries);
+        });
 
         setPendingTxs((prev) => {
           const next = new Map(prev);
@@ -162,7 +174,7 @@ export default function Home() {
     };
 
     updateBlockNumber();
-    const interval = setInterval(updateBlockNumber, 1500);
+    const interval = setInterval(updateBlockNumber, 1000);
     return () => clearInterval(interval);
   }, [provider]);
 
@@ -256,6 +268,24 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [autoSend, wallet, handleSend]); // Added handleSend to dependencies
 
+  useEffect(() => {
+    const fetchGateways = async () => {
+      try {
+        const response = await fetch("/api/registry");
+        const data = await response.json();
+
+        setGateways(data.gateways);
+        setFutureGateways(data.futureGateways);
+      } catch (error) {
+        console.error("Failed to fetch gateways:", error);
+      }
+    };
+
+    fetchGateways();
+    const interval = setInterval(fetchGateways, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
   return (
     <div className="min-h-screen bg-[#0A0A0C] p-8 font-sans text-gray-100 flex flex-col">
       <div className="max-w-6xl mx-auto flex-grow w-full">
@@ -281,6 +311,94 @@ export default function Home() {
           </form>
         </div>
 
+        <div className="bg-[#161618] rounded-xl overflow-hidden border border-[#2A2A2E] mb-6">
+          <table className="w-full">
+            <thead className="bg-[#1A1A1C] border-b border-[#2A2A2E]">
+              <tr>
+                <th className="text-left p-4 text-sm text-gray-400 font-medium">
+                  Gateway
+                </th>
+                <th className="text-left p-4 text-sm text-gray-400 font-medium">
+                  Address
+                </th>
+                <th className="text-left p-4 text-sm text-gray-400 font-medium">
+                  Role
+                </th>
+                <th className="text-left p-4 text-sm text-gray-400 font-medium">
+                  Ping (sequencer)
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {(() => {
+                const currentUrl = futureGateways.find(
+                  (gw) => gw.blockNumber === currentBlock
+                )?.url;
+
+                const nextUrl = futureGateways.find(
+                  (gw) => gw.blockNumber > currentBlock && gw.url !== currentUrl
+                )?.url;
+
+                const blocksLeft = futureGateways.filter(
+                  (gw) =>
+                    gw.url === currentUrl && gw.blockNumber >= currentBlock
+                ).length;
+
+                return gateways.map((gateway, i) => {
+                  const isCurrent = currentUrl === gateway.url;
+                  const isNext = nextUrl === gateway.url;
+
+                  return (
+                    <tr
+                      key={i}
+                      className={`border-b border-[#2A2A2E] ${
+                        isCurrent ? "bg-[#2A2A2E]" : ""
+                      }`}
+                    >
+                      <td className="p-4">
+                        <p className="font-mono text-[#00FFB2]">
+                          {gateway.url}
+                        </p>
+                      </td>
+                      <td className="p-4">
+                        <p className="font-mono text-[#00FFB2]">
+                          {gateway.address}
+                        </p>
+                      </td>
+                      <td className="p-4">
+                        {isCurrent && (
+                          <span className="px-3 py-1.5 rounded-lg text-sm bg-[#00FFB2] text-[#0A0A0C] whitespace-nowrap">
+                            Leader ({blocksLeft} blocks)
+                          </span>
+                        )}
+                        {isNext && (
+                          <span className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#2A2A2E] text-[#7F5FFF] border border-[#7F5FFF]">
+                            Next
+                          </span>
+                        )}
+                        {!isCurrent && !isNext && (
+                          <span className="text-gray-400">Standby</span>
+                        )}
+                      </td>
+                      <td className="p-4">
+                        <span
+                          className={
+                            gateway.ping
+                              ? "font-mono text-[#00FFB2]"
+                              : "text-gray-400"
+                          }
+                        >
+                          {gateway.ping ? `${gateway.ping}ms` : "-"}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                });
+              })()}
+            </tbody>
+          </table>
+        </div>
+
         {!wallet ? (
           <div className="flex justify-center items-center min-h-[200px]">
             <button
@@ -304,7 +422,9 @@ export default function Home() {
                   <p className="text-gray-300">
                     Balance:{" "}
                     <span className="font-mono text-[#00FFB2]">
-                      {formatEther(balance)} ETH
+                      {balance === BigInt(0)
+                        ? "Waiting for airdrop..."
+                        : `${formatEther(balance)} ETH`}
                     </span>
                   </p>
                 </div>
@@ -312,22 +432,43 @@ export default function Home() {
                 <div className="flex flex-col gap-2 items-end">
                   <button
                     onClick={handleSend}
-                    className="bg-[#2A2A2E] hover:bg-[#3A3A3E] text-[#00FFB2] px-6 py-2 rounded-lg transition-colors duration-200 border border-[#00FFB2]"
+                    disabled={balance === BigInt(0)}
+                    className={`px-6 py-2 rounded-lg transition-colors duration-200 border ${
+                      balance === BigInt(0)
+                        ? "bg-[#1A1A1C] text-gray-500 border-gray-500 cursor-not-allowed"
+                        : "bg-[#2A2A2E] hover:bg-[#3A3A3E] text-[#00FFB2] border-[#00FFB2]"
+                    }`}
                   >
                     Send TX
                   </button>
                   <div className="flex items-center gap-2">
-                    <label className="text-sm text-gray-300">Auto Send</label>
+                    <label
+                      className={`text-sm ${
+                        balance === BigInt(0)
+                          ? "text-gray-500"
+                          : "text-gray-300"
+                      }`}
+                    >
+                      Auto Send
+                    </label>
                     <button
-                      onClick={() => setAutoSend(!autoSend)}
+                      onClick={() =>
+                        balance > BigInt(0) && setAutoSend(!autoSend)
+                      }
                       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 ${
-                        autoSend ? "bg-[#00FFB2]" : "bg-[#2A2A2E]"
+                        balance === BigInt(0)
+                          ? "bg-[#1A1A1C] cursor-not-allowed"
+                          : autoSend
+                          ? "bg-[#00FFB2]"
+                          : "bg-[#2A2A2E]"
                       }`}
                     >
                       <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-200 ${
-                          autoSend ? "translate-x-6" : "translate-x-1"
-                        }`}
+                        className={`inline-block h-4 w-4 transform rounded-full transition-transform duration-200 ${
+                          autoSend
+                            ? "translate-x-6 bg-white"
+                            : "translate-x-1 bg-gray-400"
+                        } ${balance === BigInt(0) ? "bg-gray-600" : ""}`}
                       />
                     </button>
                   </div>
@@ -350,7 +491,7 @@ export default function Home() {
                   </p>
                 </div>
                 <div className="space-y-1">
-                  <p className="text-sm text-gray-400">Ping Latency</p>
+                  <p className="text-sm text-gray-400">Ping Latency (RPC)</p>
                   <p className="text-2xl font-mono text-[#00FFB2]">
                     {pingLatency}ms
                   </p>
@@ -403,19 +544,21 @@ export default function Home() {
                       Status
                     </th>
                     <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
-                      Block#
+                      Block #
                     </th>
                     <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
-                      Txn Idx
+                      Latency
+                    </th>
+                    {/* <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                      Gateway
                     </th>
                     <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
-                      Latency (ms)
-                    </th>
+                      Network
+                    </th> */}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#2A2A2E]">
                   {[...confirmedTxs.entries(), ...pendingTxs.entries()]
-                    // sort ascending by nonce; for descending swap a and b
                     .sort(([nonceA], [nonceB]) => nonceB - nonceA)
                     .slice(0, 50)
                     .map(([nonce, info]) => (
@@ -433,7 +576,7 @@ export default function Home() {
                             rel="noopener noreferrer"
                             className="hover:text-[#00FFB2] hover:underline"
                           >
-                            {info.hash}
+                            {info.hash.slice(0, 10)}...
                           </a>
                         </td>
                         <td className="px-4 py-2 text-sm">
@@ -451,11 +594,14 @@ export default function Home() {
                           {info.blockNumber ?? "-"}
                         </td>
                         <td className="px-4 py-2 font-mono text-sm text-gray-300">
-                          {info.txIndex ?? "-"}
+                          {info.latencyMs ? info.latencyMs + "ms" : "-"}
+                        </td>
+                        {/* <td className="px-4 py-2 font-mono text-sm text-gray-300">
+                          -
                         </td>
                         <td className="px-4 py-2 font-mono text-sm text-gray-300">
-                          {info.latencyMs ?? "-"}
-                        </td>
+                          -
+                        </td> */}
                       </tr>
                     ))}
                 </tbody>
